@@ -1,30 +1,50 @@
 import sys
+import argparse
 from scapy.all import ICMP, IP, sr1
 from netaddr import IPNetwork
+import concurrent.futures
+import logging
 
-def ping_sweep(network, netmask):
+def ping_host(host, timeout):
+    response = sr1(IP(dst=str(host))/ICMP(), timeout=timeout, verbose=0)
+    return str(host) if response else None
+
+def ping_sweep(network, netmask, timeout):
     live_hosts = []
-    total_hosts = 0
-    scanned_hosts = 0
+    ip_network = IPNetwork(f"{network}/{netmask}")
 
-    ip_network = IPNetwork(network + '/' + netmask)
-    for host in ip_network.iter_hosts():
-        total_hosts += 1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+        future_to_ip = {executor.submit(ping_host, host, timeout): host for host in ip_network.iter_hosts()}
 
-    for host in ip_network.iter_hosts():
-        scanned_hosts += 1
-        print(f"Scanning: {scanned_hosts}/{total_hosts}", end="\r")
-        response = sr1(IP(dst=str(host))/ICMP(), timeout=1, verbose=0)
-        if response is not None:
-            live_hosts.append(str(host))
-            print(f"Host {host} is online.")
+        for future in concurrent.futures.as_completed(future_to_ip):
+            host = future_to_ip[future]
+            try:
+                result = future.result()
+                if result:
+                    live_hosts.append(result)
+                    print(f"Host {result} is online.")
+            except Exception as exc:
+                print(f"Host {host} generated an exception: {exc}")
 
     return live_hosts
 
-if __name__ == "__main__":
-    network = sys.argv[1]
-    netmask = sys.argv[2]
+def main():
+    parser = argparse.ArgumentParser(description="Ping Sweep Script")
+    parser.add_argument("network", type=str, help="Network address (e.g., 192.168.1.0)")
+    parser.add_argument("netmask", type=str, help="Netmask (e.g., 24)")
+    parser.add_argument("--timeout", type=int, default=1, help="Timeout in seconds (default: 1)")
+    parser.add_argument("--logfile", type=str, help="Log file to save results")
 
-    live_hosts = ping_sweep(network, netmask)
-    print("completed\n")
+    args = parser.parse_args()
+
+    logging.basicConfig(filename=args.logfile, level=logging.INFO, format='%(asctime)s %(message)s')
+
+    live_hosts = ping_sweep(args.network, args.netmask, args.timeout)
+    print("\nScan completed.")
     print(f"Live hosts: {live_hosts}")
+
+    if args.logfile:
+        logging.info(f"Live hosts: {live_hosts}")
+
+if __name__ == "__main__":
+    main()
